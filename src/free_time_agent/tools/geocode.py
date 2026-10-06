@@ -9,10 +9,11 @@ import time
 
 import httpx
 
-from ._common import cache_path, http_client, read_json, write_json
+from ._common import cache_path, env_float, env_str, http_client, read_json, write_json
 
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-MIN_INTERVAL_S = 1.0
+NOMINATIM_URL = env_str("NOMINATIM_URL", "https://nominatim.openstreetmap.org/search")
+# Nominatim's policy allows at most 1 request/second; don't set this below 1.0.
+MIN_INTERVAL_S = max(1.0, env_float("NOMINATIM_MIN_INTERVAL_S", 1.0))
 
 _lock = threading.Lock()
 _last_request = 0.0

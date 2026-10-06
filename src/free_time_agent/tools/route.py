@@ -12,13 +12,13 @@ import os
 
 import httpx
 
-from ._common import haversine_km, http_client
+from ._common import env_float, env_str, haversine_km, http_client
 
 Point = tuple[float, float]  # (lat, lon)
 
-ORS_URL = "https://api.openrouteservice.org/v2/directions/foot-walking"
-OSRM_FOOT_URL = "https://routing.openstreetmap.de/routed-foot/route/v1/foot"
-DETOUR_FACTOR = 1.3
+ORS_URL = env_str("ORS_URL", "https://api.openrouteservice.org/v2/directions/foot-walking")
+OSRM_FOOT_URL = env_str("OSRM_FOOT_URL", "https://routing.openstreetmap.de/routed-foot/route/v1/foot")
+DETOUR_FACTOR = env_float("ROUTE_DETOUR_FACTOR", 1.3)
 
 
 def _ors(start: Point, end: Point, api_key: str) -> dict:

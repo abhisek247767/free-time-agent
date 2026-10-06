@@ -7,15 +7,29 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 
-DATA_DIR = Path(os.environ.get("FREE_TIME_AGENT_DATA", Path.cwd() / "data"))
+# Settings come from the environment, optionally loaded from a .env file in the
+# project root (found by searching up from this file). Real environment
+# variables take precedence over .env.
+load_dotenv()
+
+
+def env_str(name: str, default: str) -> str:
+    return os.environ.get(name) or default
+
+
+def env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    return float(value) if value else default
+
+
+DATA_DIR = Path(env_str("FREE_TIME_AGENT_DATA", str(Path.cwd() / "data")))
 
 # OSM services (Nominatim, Overpass) require an identifying User-Agent.
-USER_AGENT = os.environ.get(
-    "FREE_TIME_AGENT_USER_AGENT", "free-time-agent/0.1 (personal hobby project)"
-)
+USER_AGENT = env_str("FREE_TIME_AGENT_USER_AGENT", "free-time-agent/0.1 (personal hobby project)")
 
-HTTP_TIMEOUT = 20.0
+HTTP_TIMEOUT = env_float("HTTP_TIMEOUT_S", 20.0)
 
 
 def http_client() -> httpx.Client:

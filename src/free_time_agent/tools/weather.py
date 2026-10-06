@@ -4,9 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from ._common import cache_path, coord_key, http_client, read_json, write_json
+from ._common import cache_path, coord_key, env_str, http_client, read_json, write_json
 
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_URL = env_str("OPEN_METEO_URL", "https://api.open-meteo.com/v1/forecast")
 HOURLY_FIELDS = "temperature_2m,precipitation_probability,wind_speed_10m"
 
 

@@ -7,9 +7,19 @@ your city the tool keeps working without a network.
 
 import httpx
 
-from ._common import cache_path, coord_key, haversine_km, http_client, read_json, write_json
+from ._common import (
+    cache_path,
+    coord_key,
+    env_float,
+    env_str,
+    haversine_km,
+    http_client,
+    read_json,
+    write_json,
+)
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URL = env_str("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
+OVERPASS_TIMEOUT_S = env_float("OVERPASS_TIMEOUT_S", 40.0)
 
 # Unnamed highway=path segments number in the thousands in any city and are
 # useless to suggest, so only named paths are requested.
@@ -50,7 +60,7 @@ def _simplify(element: dict) -> dict | None:
 def _fetch(lat: float, lon: float, radius_m: int) -> list[dict]:
     query = QUERY_TEMPLATE.format(r=radius_m, lat=lat, lon=lon)
     with http_client() as client:
-        resp = client.post(OVERPASS_URL, data={"data": query}, timeout=40.0)
+        resp = client.post(OVERPASS_URL, data={"data": query}, timeout=OVERPASS_TIMEOUT_S)
         resp.raise_for_status()
         elements = resp.json()["elements"]
     return [s for e in elements if (s := _simplify(e))]
