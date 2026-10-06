@@ -1,0 +1,21 @@
+[project]
+name = "free-time-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "abhisek", email = "abhisekroy169@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "langchain>=1.4.3",
+    "langchain-ollama>=1.1.0",
+    "pydantic>=2.13.5",
+]
+
+[project.scripts]
+free-time-agent = "free_time_agent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
