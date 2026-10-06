@@ -24,6 +24,11 @@ def env_float(name: str, default: float) -> float:
     return float(value) if value else default
 
 
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    return int(value) if value else default
+
+
 DATA_DIR = Path(env_str("FREE_TIME_AGENT_DATA", str(Path.cwd() / "data")))
 
 # OSM services (Nominatim, Overpass) require an identifying User-Agent.

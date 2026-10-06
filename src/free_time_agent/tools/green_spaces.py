@@ -5,12 +5,15 @@ cached result is merged and filtered by distance, so once you have queried
 your city the tool keeps working without a network.
 """
 
+import time
+
 import httpx
 
 from ._common import (
     cache_path,
     coord_key,
     env_float,
+    env_int,
     env_str,
     haversine_km,
     http_client,
@@ -20,6 +23,8 @@ from ._common import (
 
 OVERPASS_URL = env_str("OVERPASS_URL", "https://overpass-api.de/api/interpreter")
 OVERPASS_TIMEOUT_S = env_float("OVERPASS_TIMEOUT_S", 40.0)
+OVERPASS_ATTEMPTS = env_int("OVERPASS_ATTEMPTS", 2)
+OVERPASS_RETRY_DELAY_S = env_float("OVERPASS_RETRY_DELAY_S", 3.0)
 
 # Unnamed highway=path segments number in the thousands in any city and are
 # useless to suggest, so only named paths are requested.
@@ -59,11 +64,19 @@ def _simplify(element: dict) -> dict | None:
 
 def _fetch(lat: float, lon: float, radius_m: int) -> list[dict]:
     query = QUERY_TEMPLATE.format(r=radius_m, lat=lat, lon=lon)
-    with http_client() as client:
-        resp = client.post(OVERPASS_URL, data={"data": query}, timeout=OVERPASS_TIMEOUT_S)
-        resp.raise_for_status()
-        elements = resp.json()["elements"]
-    return [s for e in elements if (s := _simplify(e))]
+    # The public Overpass server often answers 429/504 under load; one retry
+    # after a short pause usually succeeds.
+    for attempt in range(OVERPASS_ATTEMPTS):
+        try:
+            with http_client() as client:
+                resp = client.post(OVERPASS_URL, data={"data": query}, timeout=OVERPASS_TIMEOUT_S)
+                resp.raise_for_status()
+                elements = resp.json()["elements"]
+            return [s for e in elements if (s := _simplify(e))]
+        except httpx.HTTPError:
+            if attempt == OVERPASS_ATTEMPTS - 1:
+                raise
+            time.sleep(OVERPASS_RETRY_DELAY_S)
 
 
 def _all_cached() -> list[dict]:
