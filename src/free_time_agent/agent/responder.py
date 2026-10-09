@@ -31,8 +31,7 @@ If FACTS.safety is empty, stop after sentence 2.
 If FACTS has no park, sentence 1 is instead: "No park found nearby, so walk around your area, leaving by <FACTS.leave_by> and turning back by <FACTS.turn_back_by>.\"""",
     "weather": "Answer the user's weather question in 1-2 sentences using the weather numbers.",
     "daylight": "Answer the user's sunrise/sunset/golden hour question in 1-2 sentences using the sun times.",
-    "log_walk": "Confirm in one short sentence what was saved: the distance in km and the place.",
-    "other": "Say in one sentence that you can only help plan walks, check weather and daylight, or log walks.",
+    "other": "Say in one sentence that you can only help plan walks and check weather and daylight.",
 }
 
 MAX_SENTENCES = 3

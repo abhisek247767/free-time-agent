@@ -1,9 +1,8 @@
 """Step 8: the plain tools wrapped as LangChain tools.
 
-tev1 chooses an action rather than reading these docstrings, but they still
-form each tool's schema, so they stay short and say when to call the tool.
-Outputs are small and JSON-friendly (times as "HH:MM") because they are passed
-to the responder model as context.
+Qwen fills in the arguments from these schemas and docstrings, so they stay
+short and say when to call each tool. Outputs are small and JSON-friendly
+(times as "HH:MM") because they go back to the model as context.
 """
 
 from datetime import date as date_cls
@@ -86,12 +85,6 @@ def turnaround_time(start_time: str, sunset: str, buffer_min: int = 15) -> dict:
     return out
 
 
-@tool
-def log_outing(place: str, distance_km: float, notes: str = "") -> dict:
-    """Save a finished walk to the log. Only call when the user says they completed a walk."""
-    return base.log_outing(place, distance_km, notes)
-
-
 ALL_TOOLS = [
     geocode,
     get_weather,
@@ -100,6 +93,5 @@ ALL_TOOLS = [
     get_walk_route,
     walk_time,
     turnaround_time,
-    log_outing,
 ]
 TOOLS_BY_NAME = {t.name: t for t in ALL_TOOLS}

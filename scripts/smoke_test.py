@@ -3,21 +3,17 @@
 Run with:  uv run python scripts/smoke_test.py ["Place name"]
 """
 
-import sqlite3
 import sys
 import traceback
 from datetime import datetime
 from pprint import pprint
 
-from free_time_agent.tools._common import cache_path
 from free_time_agent.tools import (
     find_green_spaces,
     geocode,
     get_sun_times,
     get_walk_route,
     get_weather,
-    log_outing,
-    outing_stats,
     turnaround_time,
     walk_time,
 )
@@ -56,14 +52,6 @@ run("walk_time", walk_time, distance, "normal")
 sunset = sun["sunset"] if sun else datetime.now().replace(hour=18, minute=0)
 start = sunset.replace(hour=16, minute=30, second=0, microsecond=0)
 run("turnaround_time", turnaround_time, start, sunset, buffer_min=15)
-
-logged = run("log_outing", log_outing, PLACE, distance, "smoke test")
-run("outing_stats", outing_stats)
-
-# Remove the test row so it doesn't skew real walk stats.
-if logged:
-    with sqlite3.connect(cache_path("outings.db")) as conn:
-        conn.execute("DELETE FROM outings WHERE id = ?", (logged["id"],))
 
 print("\n" + ("All tools OK." if not failures else f"FAILED: {', '.join(failures)}"))
 sys.exit(1 if failures else 0)

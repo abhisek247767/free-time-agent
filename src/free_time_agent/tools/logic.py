@@ -1,9 +1,6 @@
 """Step 6: pure-logic tools — no network."""
 
-import sqlite3
 from datetime import datetime, timedelta
-
-from ._common import cache_path
 
 PACES_MIN_PER_KM = {"slow": 15.0, "normal": 12.0, "brisk": 10.0}
 
@@ -56,44 +53,4 @@ def turnaround_time(
         "back_by": deadline,
         "available_min": round(available),
         "max_outbound_min": round(available / 2),
-    }
-
-
-def _db() -> sqlite3.Connection:
-    conn = sqlite3.connect(cache_path("outings.db"))
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS outings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            logged_at TEXT NOT NULL,
-            place TEXT NOT NULL,
-            distance_km REAL NOT NULL,
-            notes TEXT
-        )"""
-    )
-    return conn
-
-
-def log_outing(place: str, distance: float, notes: str = "") -> dict:
-    """Save a walk to local SQLite. `distance` is in km."""
-    logged_at = datetime.now().isoformat(timespec="seconds")
-    with _db() as conn:
-        cur = conn.execute(
-            "INSERT INTO outings (logged_at, place, distance_km, notes) VALUES (?, ?, ?, ?)",
-            (logged_at, place, distance, notes),
-        )
-    return {"id": cur.lastrowid, "logged_at": logged_at, "place": place, "distance_km": distance}
-
-
-def outing_stats() -> dict:
-    """Totals across all logged walks."""
-    with _db() as conn:
-        count, total, longest = conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(distance_km), 0), COALESCE(MAX(distance_km), 0) FROM outings"
-        ).fetchone()
-        places = conn.execute("SELECT COUNT(DISTINCT place) FROM outings").fetchone()[0]
-    return {
-        "walks": count,
-        "total_km": round(total, 2),
-        "longest_km": longest,
-        "unique_places": places,
     }
