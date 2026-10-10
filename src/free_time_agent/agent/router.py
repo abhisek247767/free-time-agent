@@ -8,6 +8,7 @@
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -24,7 +25,7 @@ ROUTER_MODEL = env_str("ROUTER_MODEL", "tev1:0.8b")
 ROUTER_TIMEOUT_S = env_float("ROUTER_TIMEOUT_S", 120.0)
 RESPONSE_MODEL = env_str("RESPONSE_MODEL", "qwen2.5:3b")
 MAX_ROUNDS = env_int("MAX_TOOL_ROUNDS", 3)
-HOME_CITY = env_str("HOME_CITY", "")
+DEFAULT_LOCATION = env_str("DEFAULT_LOCATION", "Kolkata, West Bengal")
 
 # Option wording matters a lot for a 0.8B classifier; these short phrasings
 # scored best on a labelled sample.
@@ -47,9 +48,10 @@ TOOLS_FOR_ACTION = {
 }
 
 ARGS_PROMPT = """You fill in arguments for tool calls. Do not answer the user.
-Now: {now}.{city_hint}
+Now: {now}.
 Tools to use: {tools}.
-- First call geocode ALONE with the place name from the user's message.
+- First call geocode ALONE with the place named in the user's message.
+  Only if the message names no place at all, use "{location}".
 - Then call the other tools using the exact lat/lon geocode returned.
 - turnaround_time: start_time is the current time, sunset comes from get_sun_times.
 - get_walk_route: from the geocode lat/lon to the first park from find_green_spaces.
@@ -67,6 +69,7 @@ class ToolRun:
 @dataclass
 class LoopResult:
     request: str
+    location: str = DEFAULT_LOCATION
     intent: str = "other"
     confidence: float = 0.0
     runs: list[ToolRun] = field(default_factory=list)
@@ -101,29 +104,80 @@ def _execute(name: str, args: dict) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def run_tool_loop(request: str) -> LoopResult:
+def _region(location: str) -> str:
+    """Last part of the location, e.g. "West Bengal", used to disambiguate place names."""
+    return location.split(",")[-1].strip()
+
+
+def _geocode(args: dict, location: str) -> dict:
+    """Look the place up within the user's region first, then anywhere."""
+    place, region = args["place_name"], _region(location)
+    if region and region.lower() not in place.lower():
+        hit = _execute("geocode", {"place_name": f"{place}, {region}"})
+        if "error" not in hit:
+            return hit
+    return _execute("geocode", args)
+
+
+def _checked_args(name: str, args: dict, location: str, result: LoopResult) -> dict:
+    """Keep Qwen's arguments, but replace values a 3B model is known to get wrong.
+
+    Coordinates must come from tool results, never from the model's guesses.
+    """
+    if name == "geocode":
+        if not args.get("place_name"):
+            args = {"place_name": location}  # it sometimes passes lat/lon instead of a name
+        return {"place_name": args["place_name"]}
+
+    here = result.output_of("geocode")
+    if here:
+        for key, src in (("lat", "lat"), ("lon", "lon"), ("from_lat", "lat"), ("from_lon", "lon")):
+            if key in args or (name == "get_walk_route" and key.startswith("from")):
+                args[key] = here[src]
+    if name == "get_walk_route":
+        parks = (result.output_of("find_green_spaces") or {}).get("places") or []
+        if parks and (args.get("to_lat"), args.get("to_lon")) not in {(p["lat"], p["lon"]) for p in parks}:
+            args["to_lat"], args["to_lon"] = parks[0]["lat"], parks[0]["lon"]
+    if name in ("get_weather", "get_sun_times", "find_green_spaces") and here:
+        args.setdefault("lat", here["lat"])
+        args.setdefault("lon", here["lon"])
+    return args
+
+
+def run_tool_loop(
+    request: str, location: str = DEFAULT_LOCATION, on_step: Callable[[str], None] | None = None
+) -> LoopResult:
+    """Run router + tool rounds. `on_step` receives short progress messages (used by the UI)."""
+    step = on_step or (lambda _msg: None)
     decision = decide(request)
     result = LoopResult(
         request=request,
+        location=location,
         intent=decision["choice"],
         confidence=decision["probabilities"][decision["choice"]],
     )
     tool_names = TOOLS_FOR_ACTION.get(result.intent, [])
+    step(f"Router chose **{result.intent}** ({result.confidence:.0%}): {', '.join(tool_names) or 'no tools'}")
     if not tool_names:
         return result
 
     llm = ChatOllama(model=RESPONSE_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
     llm = llm.bind_tools([TOOLS_BY_NAME[n] for n in tool_names])
-    city_hint = f"\nIf the user gives only an area name, add \", {HOME_CITY}\" to it." if HOME_CITY else ""
     system = ARGS_PROMPT.format(
-        now=datetime.now().strftime("%A %Y-%m-%d %H:%M"), city_hint=city_hint, tools=", ".join(tool_names)
+        now=datetime.now().strftime("%A %Y-%m-%d %H:%M"), location=location, tools=", ".join(tool_names)
     )
     messages = [SystemMessage(system), HumanMessage(request)]
 
     for round_no in range(1, MAX_ROUNDS + 1):
+        step(f"Round {round_no}: {RESPONSE_MODEL} is choosing tool arguments…")
         ai = llm.invoke(messages)
         if not ai.tool_calls:
-            break
+            missing = [n for n in tool_names if n not in result.tools_called]
+            if not missing:
+                break
+            # The small model sometimes stops early; remind it once per round.
+            messages += [ai, HumanMessage(f"You have not called: {', '.join(missing)}. Call them now.")]
+            continue
         result.rounds = round_no
         messages.append(ai)
         # Coordinates guessed in the same round as geocode are made up, so
@@ -134,9 +188,13 @@ def run_tool_loop(request: str) -> LoopResult:
                 output = {"error": f"{call['name']} is not allowed for this request"}
             elif has_geocode and call["name"] != "geocode":
                 output = {"error": "skipped: call again next round with geocode's lat/lon"}
+            elif call["name"] == "geocode" and result.output_of("geocode"):
+                output = result.output_of("geocode")  # already located; don't look up again
             else:
-                output = _execute(call["name"], call["args"])
-                result.runs.append(ToolRun(round_no, call["name"], call["args"], output))
+                args = _checked_args(call["name"], dict(call["args"]), location, result)
+                output = _geocode(args, location) if call["name"] == "geocode" else _execute(call["name"], args)
+                step(f"Ran `{call['name']}`" + (" (error)" if "error" in output else ""))
+                result.runs.append(ToolRun(round_no, call["name"], args, output))
             messages.append(ToolMessage(json.dumps(output, default=str), tool_call_id=call["id"], name=call["name"]))
 
     return result

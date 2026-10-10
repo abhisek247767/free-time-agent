@@ -1,4 +1,9 @@
-"""Steps 12-13: local Qwen turns the tool results into a 10-second answer."""
+"""Steps 12-13: local Qwen writes a one-line headline; code adds compact fact lines.
+
+The reply is a short headline sentence from the model plus 3-5 detail lines
+(park, times, weather, what to carry, warnings) built in code from the tool
+results, so every number shown is exact.
+"""
 
 import json
 import re
@@ -15,41 +20,29 @@ from .router import OLLAMA_BASE_URL, LoopResult
 RESPONSE_MODEL = env_str("RESPONSE_MODEL", "qwen2.5:3b")
 RESPONSE_TEMPERATURE = env_float("RESPONSE_TEMPERATURE", 0.3)
 
-COMMON_RULES = """You help someone plan a short walk. They will read your reply in 10 seconds.
-Plain text only: no labels, lists, headings or emojis.
-Copy times, places, distances and numbers from FACTS and TOOL RESULTS exactly; never calculate or invent anything.
-If a tool result has an error, say in one sentence what you could not find."""
+COMMON_RULES = """You write the one-line headline of a walk-planner reply.
+Write exactly ONE short, friendly sentence of at most 20 words.
+Plain text only: no labels, lists, emojis or quotes.
+The details (times, distances, numbers) are shown below your sentence, so do not repeat them unless told to.
+Never invent places or facts that are not in FACTS."""
 
 # Only the instructions for the chosen action are sent: given every action's
 # rules at once, the 3B model copied examples from the wrong one.
 ACTION_RULES = {
-    "plan_walk": """Reply with at most 3 sentences:
-1. Go to <FACTS.park.name> (<FACTS.park.distance_km> km), leave by <FACTS.leave_by> and turn back by <FACTS.turn_back_by>.
-2. Carry <every item in FACTS.carry>.
-3. Only if FACTS.safety is not empty: "Heads up: <the FACTS.safety items>."
-If FACTS.safety is empty, stop after sentence 2.
-If FACTS has no park, sentence 1 is instead: "No park found nearby, so walk around your area, leaving by <FACTS.leave_by> and turning back by <FACTS.turn_back_by>.\"""",
-    "weather": "Answer the user's weather question in 1-2 sentences using the weather numbers.",
-    "daylight": "Answer the user's sunrise/sunset/golden hour question in 1-2 sentences using the sun times.",
-    "other": "Say in one sentence that you can only help plan walks and check weather and daylight.",
+    "plan_walk": "Sum up the plan: name FACTS.park.name and why it suits now (weather or time left). "
+    "Do not write any numbers or times. If FACTS has no park, suggest a walk around the neighbourhood.",
+    "weather": "Answer the user's weather question directly, using the numbers in FACTS.weather.",
+    "daylight": "Answer the user's sunrise/sunset/golden hour question directly, using the times in FACTS.",
+    "other": "Say that you can only help plan walks and check weather and daylight.",
 }
 
-MAX_SENTENCES = 3
 # Split after . ! ? followed by a space and a capital letter; "17:30" and "2.5 km" are safe.
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 _DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?)\b", re.IGNORECASE)
-# Small models sometimes narrate the rules ("No third note needed..."); drop those sentences.
-_META_SENTENCE = re.compile(
-    r"\b(third (sentence|note)|no (safety )?(note|warning)s?\b|(note|warning) (is )?not needed)", re.IGNORECASE
-)
 
 
 def make_responder() -> ChatOllama:
-    return ChatOllama(
-        model=RESPONSE_MODEL,
-        base_url=OLLAMA_BASE_URL,
-        temperature=RESPONSE_TEMPERATURE,
-    )
+    return ChatOllama(model=RESPONSE_MODEL, base_url=OLLAMA_BASE_URL, temperature=RESPONSE_TEMPERATURE)
 
 
 def _parse_free_minutes(request: str) -> int | None:
@@ -64,11 +57,15 @@ def _hhmm(dt: datetime) -> str:
     return dt.strftime("%H:%M")
 
 
+def _at(now: datetime, hhmm: str) -> datetime:
+    return datetime.combine(now.date(), datetime.strptime(hhmm, "%H:%M").time())
+
+
 def build_facts(result: LoopResult, now: datetime | None = None) -> dict:
     """Times, weather summary, what to carry and safety flags, computed in code.
 
-    A 3B model is unreliable at time arithmetic and threshold checks, so the
-    responder only has to phrase these facts, not derive them.
+    A 3B model is unreliable at time arithmetic and threshold checks, so these
+    are derived here and the model only has to phrase the headline.
     """
     now = now or datetime.now()
     leave_by = now + timedelta(minutes=-now.minute % 5 or 5)
@@ -82,7 +79,13 @@ def build_facts(result: LoopResult, now: datetime | None = None) -> dict:
         rain = max(h["rain_chance_pct"] or 0 for h in hours)
         temp = max(h["temperature_c"] for h in hours)
         wind = max(h["wind_kmh"] for h in hours)
-        facts["weather"] = {"max_rain_chance_pct": rain, "max_temp_c": temp, "max_wind_kmh": wind}
+        facts["weather"] = {
+            "hours": len(hours),
+            "min_temp_c": min(h["temperature_c"] for h in hours),
+            "max_temp_c": temp,
+            "max_rain_chance_pct": rain,
+            "max_wind_kmh": wind,
+        }
         if temp >= 30:
             carry.append("a cap")
         if rain >= 30:
@@ -98,45 +101,40 @@ def build_facts(result: LoopResult, now: datetime | None = None) -> dict:
         park = {"name": parks[0]["name"]}
         if route:
             park["distance_km"] = route["distance_km"]
-        else:
-            park["distance_km"] = round(parks[0]["distance_m"] / 1000, 2)
             if route.get("duration_min"):
                 park["walk_min_one_way"] = route["duration_min"]
+        else:
+            park["distance_km"] = round(parks[0]["distance_m"] / 1000, 2)
         facts["park"] = park
 
     sun = result.output_of("get_sun_times")
     if sun:
-        facts["sunset"] = sun["sunset"]
-        sunset = datetime.combine(now.date(), datetime.strptime(sun["sunset"], "%H:%M").time())
+        facts.update(sunrise=sun["sunrise"], sunset=sun["sunset"], golden_hour_evening=sun["golden_hour_evening"])
+
+    if sun and result.intent == "plan_walk":
+        sunset = _at(now, sun["sunset"])
         free_min = _parse_free_minutes(result.request)
         one_way = (facts.get("park") or {}).get("walk_min_one_way", 15)
         walk_min = free_min or 2 * one_way + 30
         home = leave_by + timedelta(minutes=walk_min)
+        turn_back = leave_by + timedelta(minutes=walk_min / 2)
 
         turnaround = result.output_of("turnaround_time")
-        latest_turn = (
-            datetime.combine(now.date(), datetime.strptime(turnaround["turnaround_at"], "%H:%M").time())
-            if turnaround and turnaround.get("turnaround_at")
-            else None
-        )
-        turn_back = leave_by + timedelta(minutes=walk_min / 2)
+        latest_turn = _at(now, turnaround["turnaround_at"]) if turnaround and turnaround.get("turnaround_at") else None
         no_daylight = (turnaround and not turnaround.get("safe")) or (
             latest_turn and latest_turn <= leave_by + timedelta(minutes=5)
         )
         if no_daylight:
             safety.append(f"not enough daylight left: sunset is at {sun['sunset']}")
-            facts["carry"] = carry
-            facts["safety"] = safety
-            return facts
-        if latest_turn and latest_turn < turn_back:
-            turn_back = latest_turn
-            home = leave_by + 2 * (turn_back - leave_by)
-        facts["turn_back_by"] = _hhmm(turn_back)
-        facts["home_by"] = _hhmm(home)
-
-        if home > sunset - timedelta(minutes=30):
-            safety.append(f"you will be heading home close to sunset at {sun['sunset']}")
-            carry.append("a phone torch")
+        else:
+            if latest_turn and latest_turn < turn_back:
+                turn_back = latest_turn
+                home = leave_by + 2 * (turn_back - leave_by)
+            facts["turn_back_by"] = _hhmm(turn_back)
+            facts["home_by"] = _hhmm(home)
+            if home > sunset - timedelta(minutes=30):
+                safety.append(f"you will be heading home close to sunset at {sun['sunset']}")
+                carry.append("a phone torch")
 
     facts["carry"] = carry
     facts["safety"] = safety
@@ -157,51 +155,92 @@ def _join(items: list[str]) -> str:
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
-def template_walk_answer(facts: dict) -> str:
-    """Deterministic answer built straight from FACTS, used when the model's reply fails checks."""
-    if "turn_back_by" not in facts:
-        return f"Skip the walk for now: {_join(facts['safety'])}." if facts["safety"] else "I couldn't plan a walk."
-    when = f"leave by {facts['leave_by']} and turn back by {facts['turn_back_by']}"
-    park = facts.get("park")
-    if park:
-        first = f"Go to {park['name']} ({park['distance_km']} km), {when}."
-    else:
-        first = f"No park found nearby, so walk around your area: {when}."
-    parts = [first, f"Carry {_join(facts['carry'])}."]
-    if facts["safety"]:
-        parts.append(f"Heads up: {_join(facts['safety'])}.")
-    return " ".join(parts)
+def detail_lines(intent: str, facts: dict) -> list[str]:
+    """Compact fact lines shown under the headline."""
+    lines: list[str] = []
+    w = facts.get("weather")
+
+    if intent == "plan_walk":
+        park = facts.get("park")
+        if park:
+            if park["distance_km"] < 0.05:
+                lines.append(f"🌳 {park['name']} · right where you are")
+            else:
+                walk = f", about {park['walk_min_one_way']} min on foot" if park.get("walk_min_one_way") else ""
+                lines.append(f"🌳 {park['name']} · {park['distance_km']} km{walk}")
+        else:
+            lines.append("🌳 No park found nearby · walk around your area")
+        if "turn_back_by" in facts:
+            lines.append(f"🕒 Leave {facts['leave_by']} → turn back {facts['turn_back_by']} → home by {facts['home_by']}")
+        if w:
+            sunset = f" · sunset {facts['sunset']}" if "sunset" in facts else ""
+            lines.append(f"🌤 {w['max_temp_c']}°C · {w['max_rain_chance_pct']}% rain · wind {w['max_wind_kmh']} km/h{sunset}")
+        lines.append(f"🎒 Carry {_join(facts['carry'])}")
+    elif intent == "weather" and w:
+        lines.append(
+            f"🌤 Next {w['hours']} h: {w['min_temp_c']}–{w['max_temp_c']}°C · rain up to {w['max_rain_chance_pct']}%"
+            f" · wind up to {w['max_wind_kmh']} km/h"
+        )
+        if len(facts["carry"]) > 1:
+            lines.append(f"🎒 Carry {_join(facts['carry'])}")
+    elif intent == "daylight" and "sunset" in facts:
+        lines.append(f"🌅 Sunrise {facts['sunrise']} · Sunset {facts['sunset']}")
+        lines.append(f"✨ Evening golden hour {facts['golden_hour_evening']}")
+
+    for warning in facts["safety"]:
+        lines.append(f"⚠️ {warning[0].upper()}{warning[1:]}")
+    return lines
 
 
-def _walk_answer_ok(text: str, facts: dict) -> bool:
-    """The reply must contain the key facts verbatim and no unfilled placeholders."""
-    if "<" in text or ">" in text or "turn_back_by" not in facts:
+def fallback_headline(intent: str, facts: dict) -> str:
+    if intent == "plan_walk":
+        if "turn_back_by" not in facts:
+            return "Better skip the walk for now."
+        park = facts.get("park")
+        return f"A short walk to {park['name']} fits your free time." if park else "Take a short walk around your area."
+    if intent == "other":
+        return "I can only help plan walks and check weather and daylight."
+    return "Here's what I found."
+
+
+def _headline_ok(text: str, intent: str, facts: dict) -> bool:
+    """Reject placeholders and invented numbers.
+
+    Walk plans may not contain numbers at all (they belong in the lines); other
+    replies may only use numbers and times that appear in FACTS.
+    """
+    if not text or "<" in text or ">" in text:
         return False
-    required = [facts["leave_by"], facts["turn_back_by"]]
-    park = facts.get("park")
-    if park:
-        required.append(park["name"])
-    elif "no park" not in text.lower():
-        return False
-    return all(item in text for item in required)
+    if intent == "plan_walk":
+        # With no park in the data the model invents one, so use the fixed headline.
+        park = facts.get("park")
+        return bool(park) and not re.search(r"\d", text) and park["name"].lower() in text.lower()
+    known = json.dumps(facts)
+    return all(num in known for num in re.findall(r"\d+(?:[.:]\d+)?", text))
 
 
 @dataclass
 class Reply:
-    text: str
-    templated: bool  # True when the model's reply failed checks and the template was used
+    headline: str
+    lines: list[str]
+    templated: bool  # True when the model's headline failed checks and a fixed one was used
+
+    @property
+    def text(self) -> str:
+        return "\n".join([self.headline, *self.lines])
 
 
 def respond(result: LoopResult, responder=None) -> Reply:
-    responder = responder or make_responder()
     facts = build_facts(result)
+    lines = detail_lines(result.intent, facts)
+    if result.intent == "other":
+        # Nothing to phrase; the model wrote a poem when asked to decline one.
+        return Reply(fallback_headline("other", facts), lines, templated=False)
+    responder = responder or make_responder()
     system = f"{COMMON_RULES}\n\n{ACTION_RULES.get(result.intent, ACTION_RULES['other'])}"
     reply = responder.invoke([SystemMessage(system), HumanMessage(build_context(result, facts))])
-    sentences = [s for s in _SENTENCE_END.split(reply.content.strip()) if not _META_SENTENCE.search(s)]
-    # The safety sentence is only allowed when code found a real risk.
-    limit = MAX_SENTENCES if facts["safety"] or result.intent != "plan_walk" else MAX_SENTENCES - 1
-    text = " ".join(sentences[:limit])
+    headline = _SENTENCE_END.split(reply.content.strip())[0].strip().strip('"')
 
-    if result.intent == "plan_walk" and not _walk_answer_ok(text, facts):
-        return Reply(template_walk_answer(facts), templated=True)
-    return Reply(text, templated=False)
+    if not _headline_ok(headline, result.intent, facts):
+        return Reply(fallback_headline(result.intent, facts), lines, templated=True)
+    return Reply(headline, lines, templated=False)

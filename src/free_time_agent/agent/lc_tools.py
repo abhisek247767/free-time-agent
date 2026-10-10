@@ -28,8 +28,8 @@ def geocode(place_name: str) -> dict:
 
 @tool
 def get_weather(lat: float, lon: float, hours: int = 3) -> dict:
-    """Hourly temperature, rain chance and wind for the next few hours at lat/lon."""
-    w = base.get_weather(lat, lon, hours=hours)
+    """Hourly temperature, rain chance and wind for the next few hours (max 6) at lat/lon."""
+    w = base.get_weather(lat, lon, hours=max(1, min(hours, 6)))
     return {"stale": w["stale"], "hours": w["hours"]}
 
 
